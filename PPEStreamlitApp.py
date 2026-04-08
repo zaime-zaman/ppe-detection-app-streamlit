@@ -19,7 +19,7 @@ st.set_page_config(page_title="PPE Detection Suite", page_icon="🦺", layout="w
 # DEFAULT_MAIN_MODEL = r"D:\PPE (Personal Protective Equipment) detection system\PPE-Project\models\ppe_yolo_model_v1_best.pt"
 # DEFAULT_GLASSES_MODEL = r"D:\PPE (Personal Protective Equipment) detection system\PPE-Project\models\Old-Model\best.pt"
 DEFAULT_MAIN_MODEL = "models/ppe_yolo_model_v1_best.pt"
-DEFAULT_GLASSES_MODEL = "models/Old-Model/best.pt"
+DEFAULT_GLASSES_MODEL = "models/best.pt"
 
 MAIN_CLASS_NAMES = {
     0: "boots",
