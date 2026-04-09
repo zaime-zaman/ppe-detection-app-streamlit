@@ -5,3 +5,5 @@ numpy
 pandas
 torch
 Pillow
+streamlit-webrtc
+av
