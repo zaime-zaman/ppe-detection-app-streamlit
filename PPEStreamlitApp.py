@@ -652,6 +652,11 @@ class PPEVideoProcessor(VideoProcessorBase):
         self.frame_count = 0
         self.last_annotated = None
         self.cached_glasses = []
+        
+        # Video recording for download
+        self.frames_buffer = []
+        self.recording = True
+        self.max_frames = 500  # ~30 seconds at 16 FPS
 
     def _update_shared_state(self, perf=None, rows=None, error=None):
         with self.lock:
@@ -716,6 +721,14 @@ class PPEVideoProcessor(VideoProcessorBase):
             cv2.putText(annotated, status_bar, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
             self.last_annotated = annotated
+            
+            # Record frame for download (keep last 500 frames)
+            if self.recording and len(self.frames_buffer) < self.max_frames:
+                self.frames_buffer.append(annotated.copy())
+            elif self.recording and len(self.frames_buffer) == self.max_frames:
+                self.frames_buffer.pop(0)
+                self.frames_buffer.append(annotated.copy())
+            
             self._update_shared_state(perf=perf, rows=[], error="")
             return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
@@ -726,6 +739,21 @@ class PPEVideoProcessor(VideoProcessorBase):
             self.last_annotated = fallback
             self._update_shared_state(error=str(e))
             return av.VideoFrame.from_ndarray(fallback, format="bgr24")
+    
+    def save_video(self, output_path: str, fps: int = 16):
+        """Save recorded frames to video file"""
+        if not self.frames_buffer:
+            return None
+        
+        h, w = self.frames_buffer[0].shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+        
+        for frame in self.frames_buffer:
+            out.write(frame)
+        
+        out.release()
+        return output_path
 
 def save_uploaded_file(uploaded_file) -> str:
     suffix = Path(uploaded_file.name).suffix
@@ -1018,6 +1046,30 @@ else:
                 st.dataframe(pd.DataFrame(live_state["rows"]), width="stretch")
             if live_state.get("error"):
                 st.error(f"Live pipeline error: {live_state['error']}")
+            
+            # Download recorded video
+            st.markdown("---")
+            st.subheader("💾 Download Recorded Video")
+            col_down1, col_down2 = st.columns(2)
+            
+            with col_down1:
+                if st.button("Save & Download Video", key="save_live_video"):
+                    if webrtc_ctx.video_processor:
+                        output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+                        webrtc_ctx.video_processor.save_video(output_file, fps=16)
+                        with open(output_file, "rb") as f:
+                            st.download_button(
+                                label="📥 Click to Download",
+                                data=f.read(),
+                                file_name="ppe_live_detection.mp4",
+                                mime="video/mp4"
+                            )
+                        st.success(f"✅ Video saved! ({len(webrtc_ctx.video_processor.frames_buffer)} frames)")
+                    else:
+                        st.warning("Video processor not available yet")
+            
+            with col_down2:
+                st.info(f"📹 Recording: {len(webrtc_ctx.video_processor.frames_buffer if webrtc_ctx.video_processor else [])} frames (max 500)")
         else:
             st.info("⏳ **Waiting for video connection...**\n\n1. Click START\n2. Allow camera permission\n3. If the feed stays black, refresh once and start again")
 
