@@ -1,6 +1,7 @@
 import os
 import time
 import tempfile
+import warnings
 from collections import deque
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -14,6 +15,9 @@ from ultralytics import YOLO
 # new imports
 import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+
+# Suppress Streamlit ScriptRunContext warnings during initialization
+warnings.filterwarnings('ignore', message='.*ScriptRunContext.*')
 
 # =========================================================
 # CONFIG
