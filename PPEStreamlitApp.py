@@ -715,11 +715,6 @@ st.session_state["show_ppe_boxes"] = show_ppe_boxes
 st.session_state["show_regions"] = show_regions
 st.session_state["persistence_frames"] = persistence_frames
 
-# Live mode settings - only set if not already in live mode
-if mode == "Live Detection":
-    st.session_state["live_frame_skip"] = frame_skip_live
-    st.session_state["infer_size_live"] = live_infer_size
-
 with st.sidebar:
     status_placeholder_sidebar.caption(f"✓ Glasses class id: {glasses_class_id}")
     status_placeholder_sidebar.caption(f"✓ Glasses model labels: {getattr(glasses_model, 'names', {})}")
@@ -824,6 +819,10 @@ else:
     frame_skip_live = st.slider("Live frame skip", 1, 8, 2, 1)
     live_infer_size = st.selectbox("Live inference size", [320, 416, 512, 640], index=1)
     run_seconds = st.slider("Run duration per session (seconds)", 5, 120, 20, 5)
+
+    # Store live mode settings in session state
+    st.session_state["live_frame_skip"] = frame_skip_live
+    st.session_state["infer_size_live"] = live_infer_size
 
     if live_source_type == "Browser Webcam (cloud-friendly)":
         st.markdown("### Live browser webcam detection")
