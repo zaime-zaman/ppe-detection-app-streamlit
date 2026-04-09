@@ -591,23 +591,45 @@ class PPEVideoProcessor(VideoProcessorBase):
     def recv(self, frame):
         try:
             img = frame.to_ndarray(format="bgr24")
-
-            annotated, perf_rows = infer_one_frame(
-                img,
-                st.session_state["ppe_model_obj"],
-                st.session_state["glasses_model_obj"],
+            
+            # Lightweight inference for live mode - skip glasses to speed up
+            t0 = time.perf_counter()
+            persons, boots, gloves, helmets, vests = detect_main(
+                img, st.session_state["ppe_model_obj"],
                 st.session_state["conf_threshold"],
                 st.session_state["iou_threshold"],
-                st.session_state.get("infer_size_live", 416),
+                st.session_state.get("infer_size_live", 320),
                 st.session_state["min_person_conf"],
                 st.session_state["min_person_area"],
-                st.session_state["min_person_height"],
+                st.session_state["min_person_height"]
+            )
+            t1 = time.perf_counter()
+            
+            # Skip glasses in live mode for speed - do only main model detection
+            glasses = []
+            t2 = time.perf_counter()
+            
+            persons = update_tracks(persons)
+            annotated, total_persons, total_violations, perf_rows = annotate_frame(
+                img, persons, boots, gloves, helmets, vests, glasses,
                 st.session_state["show_ppe_boxes"],
                 st.session_state["show_regions"],
                 st.session_state["persistence_frames"],
-                alarm_enabled=False,
+                alarm_enabled=False
             )
+            t3 = time.perf_counter()
 
+            perf = {
+                "main_model_ms": round((t1 - t0) * 1000, 1),
+                "glasses_model_ms": 0,
+                "annotation_ms": round((t3 - t2) * 1000, 1),
+                "total_ms": round((t3 - t0) * 1000, 1),
+                "est_fps": round(1000 / max(((t3 - t0) * 1000), 1), 2),
+                "persons": total_persons,
+                "violations": total_violations,
+            }
+
+            st.session_state.last_perf = perf
             self.last_annotated = annotated
             self.last_perf_rows = perf_rows
             return av.VideoFrame.from_ndarray(annotated, format="bgr24")
@@ -819,14 +841,16 @@ else:
     )
 
     frame_skip_live = st.slider("Live frame skip", 1, 8, 1, 1)
-    live_infer_size = st.selectbox("Live inference size", [320, 416, 512, 640], index=1)
+    live_infer_size = st.selectbox("Live inference size (FOR SPEED: use 320)", [320, 416, 512, 640], index=0)
     run_seconds = st.slider("Run duration per session (seconds)", 5, 120, 20, 5)
 
     # Store live mode settings in session state
     st.session_state["live_frame_skip"] = frame_skip_live
     st.session_state["infer_size_live"] = live_infer_size
+    
+    st.info("⚡ **Live mode is optimized for SPEED:**\n- Uses lightweight detection (320p)\n- Skips glasses detection to save time\n- Enables real-time smooth video feed")
 
-    if live_source_type == "Browser Webcam (cloud-friendly)":
+    if live_source_type == "Browser Webcam (Recommended)":
         st.markdown("### Live browser webcam detection")
 
         webrtc_ctx = webrtc_streamer(
