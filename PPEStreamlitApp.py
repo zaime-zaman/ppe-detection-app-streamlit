@@ -195,7 +195,7 @@ def get_person_regions(person_box: Tuple[int, int, int, int]) -> Tuple[Tuple[int
     w = x2 - x1
 
     helmet_region = (x1, y1, x2, y1 + int(0.30 * h))
-    glasses_region = (x1 + int(0.15 * w), y1 + int(0.12 * h), x2 - int(0.15 * w), y1 + int(0.42 * h))
+    glasses_region = (x1 + int(0.08 * w), y1 + int(0.08 * h), x2 - int(0.08 * w), y1 + int(0.48 * h))
     vest_region = (x1, y1 + int(0.22 * h), x2, y1 + int(0.78 * h))
     gloves_region = (x1, y1 + int(0.30 * h), x2, y1 + int(0.90 * h))
     boots_region = (x1, y1 + int(0.80 * h), x2, y2)
@@ -225,26 +225,6 @@ def remove_duplicate_persons(persons: List[dict], iou_threshold: float = 0.55) -
         if keep:
             filtered.append(p)
     return filtered
-
-
-def get_glasses_class_id(glasses_model: YOLO) -> Optional[int]:
-    names = getattr(glasses_model, "names", {})
-    if isinstance(names, list):
-        for i, name in enumerate(names):
-            if str(name).strip().lower() in ["glasses", "goggles", "safety glasses", "eyeglasses", "glass", "spectacles", "eye_glass", "eye glasses"]:
-                return i
-    elif isinstance(names, dict):
-        for i, name in names.items():
-            if str(name).strip().lower() in ["glasses", "goggles", "safety glasses", "eyeglasses", "glass", "spectacles", "eye_glass", "eye glasses"]:
-                return int(i)
-    return None
-
-
-@st.cache_resource(show_spinner=False)
-def load_models(main_model_path: str, glasses_model_path: str):
-    main_model = YOLO(main_model_path)
-    g_model = YOLO(glasses_model_path)
-    return main_model, g_model
 
 
 def detect_main(frame_bgr: np.ndarray, ppe_model: YOLO, conf_threshold: float, iou_threshold: float, infer_size: int,
@@ -323,8 +303,8 @@ def detect_glasses(frame_bgr: np.ndarray, glasses_model: YOLO, infer_size: int, 
 
     results = glasses_model.predict(
         source=frame_bgr,
-        conf=0.20,
-        iou=0.45,
+        conf=0.12,
+        iou=0.40,
         imgsz=infer_size,
         verbose=False,
         agnostic_nms=True,
@@ -339,11 +319,11 @@ def detect_glasses(frame_bgr: np.ndarray, glasses_model: YOLO, infer_size: int, 
 
             if cls_id != glasses_class_id:
                 continue
-            if conf < 0.20:
+            if conf < 0.12:
                 continue
 
             bw, bh = x2 - x1, y2 - y1
-            if bw < 8 or bh < 8 or bw * bh < 150:
+            if bw < 5 or bh < 5 or bw * bh < 60:
                 continue
 
             glasses.append({
@@ -607,9 +587,17 @@ class PPEVideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.last_annotated = None
         self.last_perf_rows = []
+        self.frame_index = 0
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        self.frame_index += 1
+
+        live_skip = st.session_state.get("live_frame_skip", 2)
+
+        # Reuse last processed frame for skipped frames
+        if self.last_annotated is not None and self.frame_index % live_skip != 0:
+            return av.VideoFrame.from_ndarray(self.last_annotated, format="bgr24")
 
         annotated, perf_rows = infer_one_frame(
             img,
@@ -617,7 +605,7 @@ class PPEVideoProcessor(VideoProcessorBase):
             st.session_state["glasses_model_obj"],
             st.session_state["conf_threshold"],
             st.session_state["iou_threshold"],
-            st.session_state["infer_size"],
+            st.session_state.get("infer_size_live", 416),
             st.session_state["min_person_conf"],
             st.session_state["min_person_area"],
             st.session_state["min_person_height"],
@@ -727,6 +715,11 @@ st.session_state["show_ppe_boxes"] = show_ppe_boxes
 st.session_state["show_regions"] = show_regions
 st.session_state["persistence_frames"] = persistence_frames
 
+# Live mode settings - only set if not already in live mode
+if mode == "Live Detection":
+    st.session_state["live_frame_skip"] = frame_skip_live
+    st.session_state["infer_size_live"] = live_infer_size
+
 with st.sidebar:
     status_placeholder_sidebar.caption(f"✓ Glasses class id: {glasses_class_id}")
     status_placeholder_sidebar.caption(f"✓ Glasses model labels: {getattr(glasses_model, 'names', {})}")
@@ -829,6 +822,7 @@ else:
     )
 
     frame_skip_live = st.slider("Live frame skip", 1, 8, 2, 1)
+    live_infer_size = st.selectbox("Live inference size", [320, 416, 512, 640], index=1)
     run_seconds = st.slider("Run duration per session (seconds)", 5, 120, 20, 5)
 
     if live_source_type == "Browser Webcam (cloud-friendly)":
@@ -837,46 +831,61 @@ else:
         webrtc_ctx = webrtc_streamer(
             key="ppe-live-browser",
             mode=WebRtcMode.SENDRECV,
-            media_stream_constraints={"video": True, "audio": False},
+            rtc_configuration={
+                "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+            },
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 1280},
+                    "height": {"ideal": 720},
+                    "frameRate": {"ideal": 15},
+                },
+                "audio": False,
+            },
             video_processor_factory=PPEVideoProcessor,
             async_processing=True,
+            video_html_attrs={
+                "style": {"width": "100%", "margin": "0 auto", "border-radius": "10px"},
+                "autoPlay": True,
+                "controls": False,
+                "muted": True,
+            },
         )
 
-        capture_col1, capture_col2 = st.columns([1, 2])
+        cap1, cap2 = st.columns([1, 2])
 
-        with capture_col1:
+        with cap1:
             capture_now = st.button("Capture current detected frame")
 
-        with capture_col2:
+        with cap2:
             st.caption("Live detection runs continuously. Use the button to save the current processed frame.")
 
-        if webrtc_ctx and webrtc_ctx.video_processor:
-            if capture_now:
-                current_frame = webrtc_ctx.video_processor.last_annotated
-                current_rows = webrtc_ctx.video_processor.last_perf_rows
+        if webrtc_ctx and webrtc_ctx.video_processor and capture_now:
+            current_frame = webrtc_ctx.video_processor.last_annotated
+            current_rows = webrtc_ctx.video_processor.last_perf_rows
 
-                if current_frame is not None:
-                    st.image(
-                        bgr_to_rgb(resize_for_display(current_frame)),
-                        caption="Captured detected frame",
-                        width=820
+            if current_frame is not None:
+                st.image(
+                    bgr_to_rgb(resize_for_display(current_frame)),
+                    caption="Captured detected frame",
+                    width=820,
+                )
+
+                success, buffer = cv2.imencode(".jpg", current_frame)
+                if success:
+                    st.download_button(
+                        "Download captured frame",
+                        data=buffer.tobytes(),
+                        file_name="ppe_live_capture.jpg",
+                        mime="image/jpeg",
                     )
 
-                    success, buffer = cv2.imencode(".jpg", current_frame)
-                    if success:
-                        st.download_button(
-                            "Download captured frame",
-                            data=buffer.tobytes(),
-                            file_name="ppe_live_capture.jpg",
-                            mime="image/jpeg"
-                        )
+                if current_rows:
+                    st.dataframe(pd.DataFrame(current_rows), width="stretch")
 
-                    if current_rows:
-                        st.dataframe(pd.DataFrame(current_rows), width="stretch")
-
-                    perf_placeholder.json(st.session_state.last_perf)
-                else:
-                    st.warning("No processed frame available yet. Start the webcam first.")
+                perf_placeholder.json(st.session_state.last_perf)
+            else:
+                st.warning("No processed frame available yet. Start the webcam first.")
 
     elif live_source_type == "IP / RTSP / HTTP Camera":
         st.markdown("Examples: `rtsp://...`, `http://.../video`, `https://...`")
