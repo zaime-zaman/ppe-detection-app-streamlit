@@ -587,37 +587,37 @@ class PPEVideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.last_annotated = None
         self.last_perf_rows = []
-        self.frame_index = 0
 
     def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        self.frame_index += 1
+        try:
+            img = frame.to_ndarray(format="bgr24")
 
-        live_skip = st.session_state.get("live_frame_skip", 2)
+            annotated, perf_rows = infer_one_frame(
+                img,
+                st.session_state["ppe_model_obj"],
+                st.session_state["glasses_model_obj"],
+                st.session_state["conf_threshold"],
+                st.session_state["iou_threshold"],
+                st.session_state.get("infer_size_live", 416),
+                st.session_state["min_person_conf"],
+                st.session_state["min_person_area"],
+                st.session_state["min_person_height"],
+                st.session_state["show_ppe_boxes"],
+                st.session_state["show_regions"],
+                st.session_state["persistence_frames"],
+                alarm_enabled=False,
+            )
 
-        # Reuse last processed frame for skipped frames
-        if self.last_annotated is not None and self.frame_index % live_skip != 0:
-            return av.VideoFrame.from_ndarray(self.last_annotated, format="bgr24")
-
-        annotated, perf_rows = infer_one_frame(
-            img,
-            st.session_state["ppe_model_obj"],
-            st.session_state["glasses_model_obj"],
-            st.session_state["conf_threshold"],
-            st.session_state["iou_threshold"],
-            st.session_state.get("infer_size_live", 416),
-            st.session_state["min_person_conf"],
-            st.session_state["min_person_area"],
-            st.session_state["min_person_height"],
-            st.session_state["show_ppe_boxes"],
-            st.session_state["show_regions"],
-            st.session_state["persistence_frames"],
-            alarm_enabled=False,
-        )
-
-        self.last_annotated = annotated
-        self.last_perf_rows = perf_rows
-        return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+            self.last_annotated = annotated
+            self.last_perf_rows = perf_rows
+            return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+        except Exception as e:
+            # If error occurs, return last frame or black frame
+            if self.last_annotated is not None:
+                return av.VideoFrame.from_ndarray(self.last_annotated, format="bgr24")
+            else:
+                # Return black frame on first error
+                return av.VideoFrame.from_ndarray(np.zeros_like(frame.to_ndarray(format="bgr24")), format="bgr24")
 
 def save_uploaded_file(uploaded_file) -> str:
     suffix = Path(uploaded_file.name).suffix
@@ -801,22 +801,24 @@ elif mode == "Video Detection":
 else:
     st.subheader("3) Live Detection")
     st.info(
-        "Deployed Streamlit apps cannot directly enumerate your local USB webcams or COM devices from the server. "
-        "For a public app, the reliable options are browser webcam capture and reachable IP/RTSP/HTTP camera streams. "
-        "Local camera index scanning works when you run the app on your own machine."
+        """
+        ### Cloud Environment Note
+        Browser webcam is the **recommended option** for cloud deployment.  
+        Local USB cameras don't work on cloud servers.  
+        Use IP/RTSP for remote camera streams.
+        """
     )
 
     live_source_type = st.radio(
         "Choose live source",
         [
-            "Browser Webcam (cloud-friendly)",
+            "Browser Webcam (Recommended)",
             "IP / RTSP / HTTP Camera",
-            "Local Camera Index (local PC only)",
         ],
         index=0,
     )
 
-    frame_skip_live = st.slider("Live frame skip", 1, 8, 2, 1)
+    frame_skip_live = st.slider("Live frame skip", 1, 8, 1, 1)
     live_infer_size = st.selectbox("Live inference size", [320, 416, 512, 640], index=1)
     run_seconds = st.slider("Run duration per session (seconds)", 5, 120, 20, 5)
 
@@ -835,16 +837,15 @@ else:
             },
             media_stream_constraints={
                 "video": {
-                    "width": {"ideal": 1280},
-                    "height": {"ideal": 720},
-                    "frameRate": {"ideal": 15},
+                    "width": {"max": 640},
+                    "height": {"max": 480},
                 },
                 "audio": False,
             },
             video_processor_factory=PPEVideoProcessor,
-            async_processing=True,
+            async_processing=False,
             video_html_attrs={
-                "style": {"width": "100%", "margin": "0 auto", "border-radius": "10px"},
+                "style": {"width": "100%", "margin": "0 auto", "display": "block"},
                 "autoPlay": True,
                 "controls": False,
                 "muted": True,
@@ -857,7 +858,7 @@ else:
             capture_now = st.button("Capture current detected frame")
 
         with cap2:
-            st.caption("Live detection runs continuously. Use the button to save the current processed frame.")
+            st.caption("Live detection runs. Use button to capture current frame.")
 
         if webrtc_ctx and webrtc_ctx.video_processor and capture_now:
             current_frame = webrtc_ctx.video_processor.last_annotated
@@ -923,55 +924,6 @@ else:
                 status_placeholder.success("IP camera session finished.")
             except Exception as e:
                 st.error(f"Could not open IP camera stream: {e}")
-
-    else:
-        candidates = list_local_camera_candidates(5)
-        if candidates:
-            selected = st.selectbox("Detected local cameras", candidates, format_func=lambda x: x[0])
-            camera_index = int(selected[1])
-        else:
-            st.warning("No local cameras auto-detected. You can still enter a camera index manually.")
-            camera_index = st.number_input("Camera index", min_value=0, max_value=10, value=0, step=1)
-
-        start_local = st.button("Start local live detection")
-
-        if start_local:
-            try:
-                cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-                if not cap.isOpened():
-                    cap = cv2.VideoCapture(camera_index)
-                if not cap.isOpened():
-                    raise RuntimeError("Could not open local camera.")
-
-                frame_holder = st.empty()
-                table_holder = st.empty()
-                start_t = time.time()
-                frame_idx = 0
-
-                while time.time() - start_t < run_seconds:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    frame_idx += 1
-                    if frame_idx % frame_skip_live != 0:
-                        continue
-
-                    annotated, perf_rows = infer_one_frame(
-                        frame, ppe_model, glasses_model,
-                        conf_threshold, iou_threshold, infer_size,
-                        min_person_conf, min_person_area, min_person_height,
-                        show_ppe_boxes, show_regions, persistence_frames,
-                        alarm_enabled=alarm_enabled
-                    )
-                    frame_holder.image(bgr_to_rgb(resize_for_display(annotated)), channels="RGB", width=820)
-                    if perf_rows:
-                        table_holder.dataframe(pd.DataFrame(perf_rows), width="stretch")
-                    perf_placeholder.json(st.session_state.last_perf)
-
-                cap.release()
-                status_placeholder.success("Local live session finished.")
-            except Exception as e:
-                st.error(f"Local camera error: {e}")
 
 st.markdown("---")
 st.subheader("Performance Summary")
