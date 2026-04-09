@@ -863,12 +863,18 @@ else:
                 key="ppe-live-browser",
                 mode=WebRtcMode.SENDRECV,
                 rtc_configuration={
-                    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+                    "iceServers": [
+                        {"urls": ["stun:stun.l.google.com:19302"]},
+                        {"urls": ["stun:stun1.l.google.com:19302"]},
+                        {"urls": ["stun:stun2.l.google.com:19302"]},
+                        {"urls": ["stun:stun3.l.google.com:19302"]},
+                        {"urls": ["stun:stun4.l.google.com:19302"]},
+                    ]
                 },
                 media_stream_constraints={
                     "video": {
-                        "width": {"min": 640, "ideal": 1280, "max": 1920},
-                        "height": {"min": 480, "ideal": 720, "max": 1080},
+                        "width": {"ideal": 1280},
+                        "height": {"ideal": 720},
                     },
                     "audio": False,
                 },
@@ -904,6 +910,8 @@ else:
                     st.metric("Violations", st.session_state.last_perf.get("violations", 0))
                 with col4:
                     st.metric("Total Time (ms)", st.session_state.last_perf.get("total_ms", 0))
+        else:
+            st.info("⏳ **Waiting for video connection...**\n\n1. Allow camera permission when prompted\n2. Ensure good internet connection\n3. Check browser console (F12) for errors")
 
     elif live_source_type == "IP / RTSP / HTTP Camera":
         st.markdown("Examples: `rtsp://...`, `http://.../video`, `https://...`")
