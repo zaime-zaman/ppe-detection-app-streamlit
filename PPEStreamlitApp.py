@@ -848,68 +848,58 @@ else:
     st.session_state["live_frame_skip"] = frame_skip_live
     st.session_state["infer_size_live"] = live_infer_size
     
-    st.info("⚡ **Live mode is optimized for SPEED:**\n- Uses lightweight detection (320p)\n- Skips glasses detection to save time\n- Enables real-time smooth video feed")
+    st.info("⚡ **Live mode is optimized for SPEED:**\nSmooth real-time detection - just like Google Meet!")
 
     if live_source_type == "Browser Webcam (Recommended)":
-        st.markdown("### Live browser webcam detection")
-
-        webrtc_ctx = webrtc_streamer(
-            key="ppe-live-browser",
-            mode=WebRtcMode.SENDRECV,
-            rtc_configuration={
-                "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-            },
-            media_stream_constraints={
-                "video": {
-                    "width": {"max": 640},
-                    "height": {"max": 480},
+        # Full screen layout for video
+        col_main = st.columns(1)[0]
+        
+        with col_main:
+            webrtc_ctx = webrtc_streamer(
+                key="ppe-live-browser",
+                mode=WebRtcMode.SENDRECV,
+                rtc_configuration={
+                    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
                 },
-                "audio": False,
-            },
-            video_processor_factory=PPEVideoProcessor,
-            async_processing=False,
-            video_html_attrs={
-                "style": {"width": "100%", "margin": "0 auto", "display": "block"},
-                "autoPlay": True,
-                "controls": False,
-                "muted": True,
-            },
-        )
-
-        cap1, cap2 = st.columns([1, 2])
-
-        with cap1:
-            capture_now = st.button("Capture current detected frame")
-
-        with cap2:
-            st.caption("Live detection runs. Use button to capture current frame.")
-
-        if webrtc_ctx and webrtc_ctx.video_processor and capture_now:
-            current_frame = webrtc_ctx.video_processor.last_annotated
-            current_rows = webrtc_ctx.video_processor.last_perf_rows
-
-            if current_frame is not None:
-                st.image(
-                    bgr_to_rgb(resize_for_display(current_frame)),
-                    caption="Captured detected frame",
-                    width=820,
-                )
-
-                success, buffer = cv2.imencode(".jpg", current_frame)
-                if success:
-                    st.download_button(
-                        "Download captured frame",
-                        data=buffer.tobytes(),
-                        file_name="ppe_live_capture.jpg",
-                        mime="image/jpeg",
-                    )
-
-                if current_rows:
-                    st.dataframe(pd.DataFrame(current_rows), width="stretch")
-
-                perf_placeholder.json(st.session_state.last_perf)
-            else:
-                st.warning("No processed frame available yet. Start the webcam first.")
+                media_stream_constraints={
+                    "video": {
+                        "width": {"min": 640, "ideal": 1280, "max": 1920},
+                        "height": {"min": 480, "ideal": 720, "max": 1080},
+                    },
+                    "audio": False,
+                },
+                video_processor_factory=PPEVideoProcessor,
+                async_processing=False,
+                video_html_attrs={
+                    "style": {
+                        "width": "100%",
+                        "height": "auto",
+                        "min-height": "600px",
+                        "border": "2px solid #00aa00",
+                        "border-radius": "8px"
+                    },
+                    "autoPlay": True,
+                    "controls": False,
+                    "muted": True,
+                },
+            )
+        
+        # Show performance stats below video
+        if webrtc_ctx.state.playing:
+            st.markdown("---")
+            st.subheader("📊 Live Detection Stats")
+            
+            # Display performance metrics
+            if st.session_state.get("last_perf"):
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("FPS", st.session_state.last_perf.get("est_fps", 0))
+                with col2:
+                    st.metric("Persons", st.session_state.last_perf.get("persons", 0))
+                with col3:
+                    st.metric("Violations", st.session_state.last_perf.get("violations", 0))
+                with col4:
+                    st.metric("Total Time (ms)", st.session_state.last_perf.get("total_ms", 0))
 
     elif live_source_type == "IP / RTSP / HTTP Camera":
         st.markdown("Examples: `rtsp://...`, `http://.../video`, `https://...`")
