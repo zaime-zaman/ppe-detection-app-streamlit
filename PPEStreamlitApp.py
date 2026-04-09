@@ -420,6 +420,57 @@ def get_stable_ppe_status(track_id: int, threshold: float = 0.45):
     return stable
 
 
+def annotate_frame_live(frame_bgr: np.ndarray, persons: List[dict], boots: List[dict], gloves: List[dict], 
+                       helmets: List[dict], vests: List[dict], glasses: List[dict], show_ppe_boxes: bool = True):
+    """Simple annotation for live mode - no session_state required"""
+    annotated = frame_bgr.copy()
+    h, w = annotated.shape[:2]
+    
+    total_persons = len(persons)
+    total_violations = 0
+    
+    # Draw PPE detections
+    for person in persons:
+        px1, py1, px2, py2 = person["box"]
+        cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 180, 0), 2)  # Green person box
+        
+        # Check if person has PPE violations based on nearby detections
+        person_region = (px1, py1, px2, py2)
+        has_helmet = any(box_iou(h_item["box"], person_region) > 0.1 for h_item in helmets)
+        has_vest = any(box_iou(v_item["box"], person_region) > 0.1 for v_item in vests)
+        
+        if not (has_helmet and has_vest):
+            total_violations += 1
+    
+    if show_ppe_boxes:
+        # Draw helmet boxes
+        for item in helmets:
+            x1, y1, x2, y2 = item["box"]
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 255), 1)  # Magenta
+        
+        # Draw vest boxes
+        for item in vests:
+            x1, y1, x2, y2 = item["box"]
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 1)  # Cyan
+        
+        # Draw gloves boxes
+        for item in gloves:
+            x1, y1, x2, y2 = item["box"]
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 165, 255), 1)  # Orange
+        
+        # Draw boots boxes
+        for item in boots:
+            x1, y1, x2, y2 = item["box"]
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 255, 0), 1)  # Yellow
+        
+        # Draw glasses boxes
+        for item in glasses:
+            x1, y1, x2, y2 = item["box"]
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 1)  # Green
+    
+    return annotated, total_persons, total_violations
+
+
 def annotate_frame(frame_bgr: np.ndarray, persons: List[dict], boots: List[dict], gloves: List[dict], helmets: List[dict],
                    vests: List[dict], glasses: List[dict], show_ppe_boxes: bool, show_regions: bool,
                    persistence_frames: int, alarm_enabled: bool = False):
@@ -643,13 +694,10 @@ class PPEVideoProcessor(VideoProcessorBase):
             glasses = self.cached_glasses if use_glasses else []
             t2 = time.perf_counter()
 
-            persons = update_tracks(persons)
-            annotated, total_persons, total_violations, perf_rows = annotate_frame(
+            # Use simple live annotation (no session_state access)
+            annotated, total_persons, total_violations = annotate_frame_live(
                 img, persons, boots, gloves, helmets, vests, glasses,
                 self.settings["show_ppe_boxes"],
-                self.settings["show_regions"],
-                self.settings["persistence_frames"],
-                alarm_enabled=False,
             )
             t3 = time.perf_counter()
 
@@ -668,7 +716,7 @@ class PPEVideoProcessor(VideoProcessorBase):
             cv2.putText(annotated, status_bar, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
             self.last_annotated = annotated
-            self._update_shared_state(perf=perf, rows=perf_rows, error="")
+            self._update_shared_state(perf=perf, rows=[], error="")
             return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
         except Exception as e:
