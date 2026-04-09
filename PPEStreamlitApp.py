@@ -11,6 +11,10 @@ import pandas as pd
 import streamlit as st
 from ultralytics import YOLO
 
+# new imports
+import av
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+
 # =========================================================
 # CONFIG
 # =========================================================
@@ -55,6 +59,29 @@ if "next_track_id" not in st.session_state:
     st.session_state.next_track_id = 1
 if "last_perf" not in st.session_state:
     st.session_state.last_perf = {}
+
+
+# =========================================================
+# HELPER FUNCTIONS FOR GLASSES DETECTION
+# =========================================================
+def get_glasses_class_id(glasses_model: YOLO) -> Optional[int]:
+    names = getattr(glasses_model, "names", {})
+    if isinstance(names, list):
+        for i, name in enumerate(names):
+            if str(name).strip().lower() in ["glasses", "goggles", "safety glasses", "eyeglasses", "glass", "spectacles", "eye_glass", "eye glasses"]:
+                return i
+    elif isinstance(names, dict):
+        for i, name in names.items():
+            if str(name).strip().lower() in ["glasses", "goggles", "safety glasses", "eyeglasses", "glass", "spectacles", "eye_glass", "eye glasses"]:
+                return int(i)
+    return None
+
+
+@st.cache_resource(show_spinner=False)
+def load_models(main_model_path: str, glasses_model_path: str):
+    main_model = YOLO(main_model_path)
+    g_model = YOLO(glasses_model_path)
+    return main_model, g_model
 
 
 # =========================================================
@@ -200,9 +227,24 @@ def remove_duplicate_persons(persons: List[dict], iou_threshold: float = 0.55) -
     return filtered
 
 
+def get_glasses_class_id(glasses_model: YOLO) -> Optional[int]:
+    names = getattr(glasses_model, "names", {})
+    if isinstance(names, list):
+        for i, name in enumerate(names):
+            if str(name).strip().lower() in ["glasses", "goggles", "safety glasses", "eyeglasses", "glass", "spectacles", "eye_glass", "eye glasses"]:
+                return i
+    elif isinstance(names, dict):
+        for i, name in names.items():
+            if str(name).strip().lower() in ["glasses", "goggles", "safety glasses", "eyeglasses", "glass", "spectacles", "eye_glass", "eye glasses"]:
+                return int(i)
+    return None
+
+
 @st.cache_resource(show_spinner=False)
 def load_models(main_model_path: str, glasses_model_path: str):
-    return YOLO(main_model_path), YOLO(glasses_model_path)
+    main_model = YOLO(main_model_path)
+    g_model = YOLO(glasses_model_path)
+    return main_model, g_model
 
 
 def detect_main(frame_bgr: np.ndarray, ppe_model: YOLO, conf_threshold: float, iou_threshold: float, infer_size: int,
@@ -245,10 +287,43 @@ def detect_main(frame_bgr: np.ndarray, ppe_model: YOLO, conf_threshold: float, i
     return remove_duplicate_persons(persons), boots, gloves, helmets, vests
 
 
-def detect_glasses(frame_bgr: np.ndarray, glasses_model: YOLO, infer_size: int):
+# def detect_glasses(frame_bgr: np.ndarray, glasses_model: YOLO, infer_size: int):
+#     results = glasses_model.predict(
+#         source=frame_bgr,
+#         conf=0.25,
+#         iou=0.45,
+#         imgsz=infer_size,
+#         verbose=False,
+#         agnostic_nms=True,
+#     )[0]
+
+#     glasses = []
+#     if results.boxes is not None:
+#         for box in results.boxes:
+#             cls_id = int(box.cls[0].item())
+#             conf = float(box.conf[0].item())
+#             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+
+#             if cls_id != 1:
+#                 continue
+#             if conf < 0.25:
+#                 continue
+
+#             bw, bh = x2 - x1, y2 - y1
+#             if bw < 10 or bh < 10 or bw * bh < 300:
+#                 continue
+
+#             glasses.append({"label": "glasses", "conf": conf, "box": (x1, y1, x2, y2)})
+
+#     return glasses
+
+def detect_glasses(frame_bgr: np.ndarray, glasses_model: YOLO, infer_size: int, glasses_class_id: Optional[int] = None):
+    if glasses_class_id is None:
+        return []
+
     results = glasses_model.predict(
         source=frame_bgr,
-        conf=0.25,
+        conf=0.20,
         iou=0.45,
         imgsz=infer_size,
         verbose=False,
@@ -262,16 +337,20 @@ def detect_glasses(frame_bgr: np.ndarray, glasses_model: YOLO, infer_size: int):
             conf = float(box.conf[0].item())
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
-            if cls_id != 1:
+            if cls_id != glasses_class_id:
                 continue
-            if conf < 0.25:
+            if conf < 0.20:
                 continue
 
             bw, bh = x2 - x1, y2 - y1
-            if bw < 10 or bh < 10 or bw * bh < 300:
+            if bw < 8 or bh < 8 or bw * bh < 150:
                 continue
 
-            glasses.append({"label": "glasses", "conf": conf, "box": (x1, y1, x2, y2)})
+            glasses.append({
+                "label": "glasses",
+                "conf": conf,
+                "box": (x1, y1, x2, y2),
+            })
 
     return glasses
 
@@ -494,7 +573,12 @@ def infer_one_frame(frame_bgr: np.ndarray, ppe_model: YOLO, glasses_model: YOLO,
         min_person_conf, min_person_area, min_person_height
     )
     t1 = time.perf_counter()
-    glasses = detect_glasses(frame_bgr, glasses_model, infer_size)
+    glasses = detect_glasses(
+        frame_bgr,
+        glasses_model,
+        infer_size,
+        st.session_state.get("glasses_class_id")
+    )
     t2 = time.perf_counter()
     persons = update_tracks(persons)
     annotated, total_persons, total_violations, perf_rows = annotate_frame(
@@ -519,7 +603,33 @@ def infer_one_frame(frame_bgr: np.ndarray, ppe_model: YOLO, glasses_model: YOLO,
 
     st.session_state.last_perf = perf
     return annotated, perf_rows
+class PPEVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.last_annotated = None
+        self.last_perf_rows = []
 
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+
+        annotated, perf_rows = infer_one_frame(
+            img,
+            st.session_state["ppe_model_obj"],
+            st.session_state["glasses_model_obj"],
+            st.session_state["conf_threshold"],
+            st.session_state["iou_threshold"],
+            st.session_state["infer_size"],
+            st.session_state["min_person_conf"],
+            st.session_state["min_person_area"],
+            st.session_state["min_person_height"],
+            st.session_state["show_ppe_boxes"],
+            st.session_state["show_regions"],
+            st.session_state["persistence_frames"],
+            alarm_enabled=False,
+        )
+
+        self.last_annotated = annotated
+        self.last_perf_rows = perf_rows
+        return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
 def save_uploaded_file(uploaded_file) -> str:
     suffix = Path(uploaded_file.name).suffix
@@ -593,11 +703,33 @@ with st.sidebar:
     show_regions = st.toggle("Show person regions", False)
     alarm_enabled = st.toggle("Enable alarm/logging", False)
 
+    st.divider()
+    st.subheader("Status")
+    status_placeholder_sidebar = st.empty()
+
 try:
     ppe_model, glasses_model = load_models(main_model_path, glasses_model_path)
+    glasses_class_id = get_glasses_class_id(glasses_model)
 except Exception as e:
     st.error(f"Model loading failed: {e}")
     st.stop()
+
+st.session_state["ppe_model_obj"] = ppe_model
+st.session_state["glasses_model_obj"] = glasses_model
+st.session_state["glasses_class_id"] = glasses_class_id
+st.session_state["conf_threshold"] = conf_threshold
+st.session_state["iou_threshold"] = iou_threshold
+st.session_state["infer_size"] = infer_size
+st.session_state["min_person_conf"] = min_person_conf
+st.session_state["min_person_area"] = min_person_area
+st.session_state["min_person_height"] = min_person_height
+st.session_state["show_ppe_boxes"] = show_ppe_boxes
+st.session_state["show_regions"] = show_regions
+st.session_state["persistence_frames"] = persistence_frames
+
+with st.sidebar:
+    status_placeholder_sidebar.caption(f"✓ Glasses class id: {glasses_class_id}")
+    status_placeholder_sidebar.caption(f"✓ Glasses model labels: {getattr(glasses_model, 'names', {})}")
 
 perf_placeholder = st.empty()
 status_placeholder = st.empty()
@@ -700,21 +832,51 @@ else:
     run_seconds = st.slider("Run duration per session (seconds)", 5, 120, 20, 5)
 
     if live_source_type == "Browser Webcam (cloud-friendly)":
-        cam_img = st.camera_input("Capture a frame from webcam")
-        if cam_img is not None:
-            file_bytes = np.asarray(bytearray(cam_img.read()), dtype=np.uint8)
-            image_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-            annotated, perf_rows = infer_one_frame(
-                image_bgr, ppe_model, glasses_model,
-                conf_threshold, iou_threshold, infer_size,
-                min_person_conf, min_person_area, min_person_height,
-                show_ppe_boxes, show_regions, persistence_frames,
-                alarm_enabled=False
-            )
-            st.image(bgr_to_rgb(resize_for_display(annotated)), caption="Browser webcam detection", width=820)
-            if perf_rows:
-                st.dataframe(pd.DataFrame(perf_rows), width="stretch")
-            perf_placeholder.json(st.session_state.last_perf)
+        st.markdown("### Live browser webcam detection")
+
+        webrtc_ctx = webrtc_streamer(
+            key="ppe-live-browser",
+            mode=WebRtcMode.SENDRECV,
+            media_stream_constraints={"video": True, "audio": False},
+            video_processor_factory=PPEVideoProcessor,
+            async_processing=True,
+        )
+
+        capture_col1, capture_col2 = st.columns([1, 2])
+
+        with capture_col1:
+            capture_now = st.button("Capture current detected frame")
+
+        with capture_col2:
+            st.caption("Live detection runs continuously. Use the button to save the current processed frame.")
+
+        if webrtc_ctx and webrtc_ctx.video_processor:
+            if capture_now:
+                current_frame = webrtc_ctx.video_processor.last_annotated
+                current_rows = webrtc_ctx.video_processor.last_perf_rows
+
+                if current_frame is not None:
+                    st.image(
+                        bgr_to_rgb(resize_for_display(current_frame)),
+                        caption="Captured detected frame",
+                        width=820
+                    )
+
+                    success, buffer = cv2.imencode(".jpg", current_frame)
+                    if success:
+                        st.download_button(
+                            "Download captured frame",
+                            data=buffer.tobytes(),
+                            file_name="ppe_live_capture.jpg",
+                            mime="image/jpeg"
+                        )
+
+                    if current_rows:
+                        st.dataframe(pd.DataFrame(current_rows), width="stretch")
+
+                    perf_placeholder.json(st.session_state.last_perf)
+                else:
+                    st.warning("No processed frame available yet. Start the webcam first.")
 
     elif live_source_type == "IP / RTSP / HTTP Camera":
         st.markdown("Examples: `rtsp://...`, `http://.../video`, `https://...`")
