@@ -3,6 +3,7 @@ import time
 import tempfile
 import warnings
 from collections import deque
+from threading import Lock
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -63,6 +64,8 @@ if "next_track_id" not in st.session_state:
     st.session_state.next_track_id = 1
 if "last_perf" not in st.session_state:
     st.session_state.last_perf = {}
+if "live_shared_state" not in st.session_state:
+    st.session_state.live_shared_state = {"perf": {}, "rows": [], "error": ""}
 
 
 # =========================================================
@@ -588,44 +591,71 @@ def infer_one_frame(frame_bgr: np.ndarray, ppe_model: YOLO, glasses_model: YOLO,
     st.session_state.last_perf = perf
     return annotated, perf_rows
 class PPEVideoProcessor(VideoProcessorBase):
-    def __init__(self):
+    def __init__(self, main_model, glasses_model, glasses_class_id, settings, shared_state):
+        self.main_model = main_model
+        self.glasses_model = glasses_model
+        self.glasses_class_id = glasses_class_id
+        self.settings = settings
+        self.shared_state = shared_state
+        self.lock = Lock()
+        self.frame_count = 0
         self.last_annotated = None
-        self.last_perf_rows = []
+        self.cached_glasses = []
+
+    def _update_shared_state(self, perf=None, rows=None, error=None):
+        with self.lock:
+            if perf is not None:
+                self.shared_state["perf"] = perf
+            if rows is not None:
+                self.shared_state["rows"] = rows
+            if error is not None:
+                self.shared_state["error"] = error
 
     def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
         try:
-            img = frame.to_ndarray(format="bgr24")
-            
-            # Lightweight inference for live mode - skip glasses to speed up
+            self.frame_count += 1
+            frame_skip = max(1, int(self.settings.get("live_frame_skip", 1)))
+            if self.frame_count % frame_skip != 0 and self.last_annotated is not None:
+                return av.VideoFrame.from_ndarray(self.last_annotated, format="bgr24")
+
             t0 = time.perf_counter()
             persons, boots, gloves, helmets, vests = detect_main(
-                img, st.session_state["ppe_model_obj"],
-                st.session_state["conf_threshold"],
-                st.session_state["iou_threshold"],
-                st.session_state.get("infer_size_live", 320),
-                st.session_state["min_person_conf"],
-                st.session_state["min_person_area"],
-                st.session_state["min_person_height"]
+                img,
+                self.main_model,
+                self.settings["conf_threshold"],
+                self.settings["iou_threshold"],
+                self.settings.get("infer_size_live", 320),
+                self.settings["min_person_conf"],
+                self.settings["min_person_area"],
+                self.settings["min_person_height"],
             )
             t1 = time.perf_counter()
-            
-            # Skip glasses in live mode for speed - do only main model detection
-            glasses = []
+
+            use_glasses = bool(self.settings.get("live_detect_glasses", True)) and self.glasses_class_id is not None
+            if use_glasses and (self.frame_count % max(1, int(self.settings.get("glasses_every_n", 3))) == 0):
+                self.cached_glasses = detect_glasses(
+                    img,
+                    self.glasses_model,
+                    self.settings.get("infer_size_live", 320),
+                    self.glasses_class_id,
+                )
+            glasses = self.cached_glasses if use_glasses else []
             t2 = time.perf_counter()
-            
+
             persons = update_tracks(persons)
             annotated, total_persons, total_violations, perf_rows = annotate_frame(
                 img, persons, boots, gloves, helmets, vests, glasses,
-                st.session_state["show_ppe_boxes"],
-                st.session_state["show_regions"],
-                st.session_state["persistence_frames"],
-                alarm_enabled=False
+                self.settings["show_ppe_boxes"],
+                self.settings["show_regions"],
+                self.settings["persistence_frames"],
+                alarm_enabled=False,
             )
             t3 = time.perf_counter()
 
             perf = {
                 "main_model_ms": round((t1 - t0) * 1000, 1),
-                "glasses_model_ms": 0,
+                "glasses_model_ms": round((t2 - t1) * 1000, 1),
                 "annotation_ms": round((t3 - t2) * 1000, 1),
                 "total_ms": round((t3 - t0) * 1000, 1),
                 "est_fps": round(1000 / max(((t3 - t0) * 1000), 1), 2),
@@ -633,17 +663,21 @@ class PPEVideoProcessor(VideoProcessorBase):
                 "violations": total_violations,
             }
 
-            st.session_state.last_perf = perf
+            status_bar = f"LIVE | Persons: {total_persons} | Violations: {total_violations} | FPS: {perf['est_fps']:.1f}"
+            cv2.rectangle(annotated, (5, 5), (annotated.shape[1] - 5, 45), (0, 0, 0), -1)
+            cv2.putText(annotated, status_bar, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
+
             self.last_annotated = annotated
-            self.last_perf_rows = perf_rows
+            self._update_shared_state(perf=perf, rows=perf_rows, error="")
             return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+
         except Exception as e:
-            # If error occurs, return last frame or black frame
-            if self.last_annotated is not None:
-                return av.VideoFrame.from_ndarray(self.last_annotated, format="bgr24")
-            else:
-                # Return black frame on first error
-                return av.VideoFrame.from_ndarray(np.zeros_like(frame.to_ndarray(format="bgr24")), format="bgr24")
+            fallback = img.copy()
+            cv2.rectangle(fallback, (0, 0), (fallback.shape[1], 50), (0, 0, 255), -1)
+            cv2.putText(fallback, f"Live detection error: {str(e)[:80]}", (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+            self.last_annotated = fallback
+            self._update_shared_state(error=str(e))
+            return av.VideoFrame.from_ndarray(fallback, format="bgr24")
 
 def save_uploaded_file(uploaded_file) -> str:
     suffix = Path(uploaded_file.name).suffix
@@ -846,75 +880,90 @@ else:
 
     frame_skip_live = st.slider("Live frame skip", 1, 8, 1, 1)
     live_infer_size = st.selectbox("Live inference size (FOR SPEED: use 320)", [320, 416, 512, 640], index=0)
+    live_detect_glasses = st.toggle("Live glasses detection", True, help="Turn off for maximum speed.")
+    glasses_every_n = st.slider("Run glasses model every Nth processed frame", 1, 5, 3, 1)
     run_seconds = st.slider("Run duration per session (seconds)", 5, 120, 20, 5)
 
-    # Store live mode settings in session state
     st.session_state["live_frame_skip"] = frame_skip_live
     st.session_state["infer_size_live"] = live_infer_size
-    
-    st.info("⚡ **Live mode is optimized for SPEED:**\nSmooth real-time detection - just like Google Meet!")
+    st.session_state["live_detect_glasses"] = live_detect_glasses
+    st.session_state["glasses_every_n"] = glasses_every_n
+
+    st.info("⚡ **Live mode optimized for smooth webcam detection:** thread-safe processing + lower webcam resolution + optional glasses throttling.")
 
     if live_source_type == "Browser Webcam (Recommended)":
-        # Full screen layout for video
-        col_main = st.columns(1)[0]
-        
-        with col_main:
-            webrtc_ctx = webrtc_streamer(
-                key="ppe-live-browser",
-                mode=WebRtcMode.SENDRECV,
-                rtc_configuration={
-                    "iceServers": [
-                        {"urls": ["stun:stun.l.google.com:19302"]},
-                        {"urls": ["stun:stun1.l.google.com:19302"]},
-                        {"urls": ["stun:stun2.l.google.com:19302"]},
-                        {"urls": ["stun:stun3.l.google.com:19302"]},
-                        {"urls": ["stun:stun4.l.google.com:19302"]},
-                        {"urls": ["turn:openrelay.metered.ca:80"], "username": "openrelayproject", "credential": "openrelayproject"},
-                        {"urls": ["turn:openrelay.metered.ca:443"], "username": "openrelayproject", "credential": "openrelayproject"},
-                        {"urls": ["turn:openrelay.metered.ca:443?transport=tcp"], "username": "openrelayproject", "credential": "openrelayproject"},
-                    ]
+        live_settings = {
+            "conf_threshold": conf_threshold,
+            "iou_threshold": iou_threshold,
+            "infer_size_live": live_infer_size,
+            "min_person_conf": min_person_conf,
+            "min_person_area": min_person_area,
+            "min_person_height": min_person_height,
+            "show_ppe_boxes": show_ppe_boxes,
+            "show_regions": show_regions,
+            "persistence_frames": persistence_frames,
+            "live_frame_skip": frame_skip_live,
+            "live_detect_glasses": live_detect_glasses,
+            "glasses_every_n": glasses_every_n,
+        }
+
+        processor_factory = lambda: PPEVideoProcessor(
+            ppe_model,
+            glasses_model,
+            glasses_class_id,
+            live_settings,
+            st.session_state.live_shared_state,
+        )
+
+        webrtc_ctx = webrtc_streamer(
+            key="ppe-live-browser",
+            mode=WebRtcMode.SENDRECV,
+            desired_playing_state=True,
+            rtc_configuration={
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {"urls": ["stun:stun1.l.google.com:19302"]},
+                ]
+            },
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 960},
+                    "height": {"ideal": 540},
+                    "frameRate": {"ideal": 20, "max": 24},
                 },
-                media_stream_constraints={
-                    "video": {
-                        "width": {"ideal": 1280},
-                        "height": {"ideal": 720},
-                    },
-                    "audio": False,
-                },
-                video_processor_factory=PPEVideoProcessor,
-                async_processing=False,
-                video_html_attrs={
-                    "style": {
-                        "width": "100%",
-                        "height": "auto",
-                        "min-height": "600px",
-                        "border": "2px solid #00aa00",
-                        "border-radius": "8px"
-                    },
-                    "autoPlay": True,
-                    "controls": False,
-                    "muted": True,
-                },
-            )
-        
-        # Show performance stats below video
+                "audio": False,
+            },
+            video_processor_factory=processor_factory,
+            async_processing=True,
+            video_html_attrs={
+                "autoPlay": True,
+                "playsInline": True,
+                "controls": False,
+                "muted": True,
+            },
+        )
+
+        live_state = st.session_state.live_shared_state
         if webrtc_ctx.state.playing:
             st.markdown("---")
             st.subheader("📊 Live Detection Stats")
-            
-            # Display performance metrics
-            if st.session_state.get("last_perf"):
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("FPS", st.session_state.last_perf.get("est_fps", 0))
-                with col2:
-                    st.metric("Persons", st.session_state.last_perf.get("persons", 0))
-                with col3:
-                    st.metric("Violations", st.session_state.last_perf.get("violations", 0))
-                with col4:
-                    st.metric("Total Time (ms)", st.session_state.last_perf.get("total_ms", 0))
+            live_perf = live_state.get("perf", {})
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("FPS", live_perf.get("est_fps", 0))
+            with col2:
+                st.metric("Persons", live_perf.get("persons", 0))
+            with col3:
+                st.metric("Violations", live_perf.get("violations", 0))
+            with col4:
+                st.metric("Total Time (ms)", live_perf.get("total_ms", 0))
+
+            if live_state.get("rows"):
+                st.dataframe(pd.DataFrame(live_state["rows"]), width="stretch")
+            if live_state.get("error"):
+                st.error(f"Live pipeline error: {live_state['error']}")
         else:
-            st.info("⏳ **Waiting for video connection...**\n\n1. Allow camera permission when prompted\n2. Ensure good internet connection\n3. Check browser console (F12) for errors")
+            st.info("⏳ **Waiting for video connection...**\n\n1. Click START\n2. Allow camera permission\n3. If the feed stays black, refresh once and start again")
 
     elif live_source_type == "IP / RTSP / HTTP Camera":
         st.markdown("Examples: `rtsp://...`, `http://.../video`, `https://...`")
@@ -956,7 +1005,7 @@ else:
 
 st.markdown("---")
 st.subheader("Performance Summary")
-last_perf = st.session_state.get("last_perf", {})
+last_perf = st.session_state.get("live_shared_state", {}).get("perf") or st.session_state.get("last_perf", {})
 if last_perf:
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Main model (ms)", last_perf.get("main_model_ms", 0))
