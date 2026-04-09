@@ -860,6 +860,11 @@ elif mode == "Video Detection":
 
 else:
     st.subheader("3) Live Detection")
+    
+    # Ensure live_shared_state is initialized
+    if "live_shared_state" not in st.session_state:
+        st.session_state.live_shared_state = {"perf": {}, "rows": [], "error": ""}
+    
     st.info(
         """
         ### Cloud Environment Note
@@ -907,12 +912,15 @@ else:
             "glasses_every_n": glasses_every_n,
         }
 
+        # Capture shared_state before lambda to avoid session_state access in thread
+        shared_state = st.session_state.live_shared_state
+        
         processor_factory = lambda: PPEVideoProcessor(
             ppe_model,
             glasses_model,
             glasses_class_id,
             live_settings,
-            st.session_state.live_shared_state,
+            shared_state,
         )
 
         webrtc_ctx = webrtc_streamer(
