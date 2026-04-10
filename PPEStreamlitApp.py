@@ -420,55 +420,168 @@ def get_stable_ppe_status(track_id: int, threshold: float = 0.45):
     return stable
 
 
-def annotate_frame_live(frame_bgr: np.ndarray, persons: List[dict], boots: List[dict], gloves: List[dict], 
-                       helmets: List[dict], vests: List[dict], glasses: List[dict], show_ppe_boxes: bool = True):
-    """Simple annotation for live mode - no session_state required"""
-    annotated = frame_bgr.copy()
-    h, w = annotated.shape[:2]
-    
+def annotate_frame_live(
+    frame_bgr: np.ndarray,
+    persons: List[dict],
+    boots: List[dict],
+    gloves: List[dict],
+    helmets: List[dict],
+    vests: List[dict],
+    glasses: List[dict],
+    show_ppe_boxes: bool = True,
+):
+    """
+    Live-mode annotation with the SAME visual style as image/video mode:
+    - person box red/green
+    - missing items text on person box
+    - detail text at bottom
+    - per-class boxes with labels
+    No session_state tracking logic is used here.
+    """
+    frame = frame_bgr.copy()
     total_persons = len(persons)
     total_violations = 0
-    
-    # Draw PPE detections
-    for person in persons:
+
+    perf_rows = []
+
+    for idx, person in enumerate(persons, start=1):
+        person_id = idx
         px1, py1, px2, py2 = person["box"]
-        cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 180, 0), 2)  # Green person box
-        
-        # Check if person has PPE violations based on nearby detections
-        person_region = (px1, py1, px2, py2)
-        has_helmet = any(box_iou(h_item["box"], person_region) > 0.1 for h_item in helmets)
-        has_vest = any(box_iou(v_item["box"], person_region) > 0.1 for v_item in vests)
-        
-        if not (has_helmet and has_vest):
-            total_violations += 1
-    
-    if show_ppe_boxes:
-        # Draw helmet boxes
+        person_box = person["box"]
+
+        helmet_region, glasses_region, vest_region, gloves_region, boots_region = get_person_regions(person_box)
+
+        best_helmet = None
+        best_glasses = None
+        best_vest = None
+        best_gloves = None
+        best_boots = None
+
+        candidate_glasses = []
+
+        # Helmet association
         for item in helmets:
-            x1, y1, x2, y2 = item["box"]
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 255), 1)  # Magenta
-        
-        # Draw vest boxes
-        for item in vests:
-            x1, y1, x2, y2 = item["box"]
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 1)  # Cyan
-        
-        # Draw gloves boxes
-        for item in gloves:
-            x1, y1, x2, y2 = item["box"]
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 165, 255), 1)  # Orange
-        
-        # Draw boots boxes
-        for item in boots:
-            x1, y1, x2, y2 = item["box"]
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 255, 0), 1)  # Yellow
-        
-        # Draw glasses boxes
+            if point_in_box(get_center(item["box"]), helmet_region):
+                if best_helmet is None or item["conf"] > best_helmet["conf"]:
+                    best_helmet = item
+
+        # Glasses association
         for item in glasses:
-            x1, y1, x2, y2 = item["box"]
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 1)  # Green
-    
-    return annotated, total_persons, total_violations
+            if point_in_box(get_center(item["box"]), glasses_region):
+                candidate_glasses.append(item)
+
+        best_glasses = merge_glasses_detections(candidate_glasses)
+
+        # Vest association
+        for item in vests:
+            if point_in_box(get_center(item["box"]), vest_region):
+                if best_vest is None or item["conf"] > best_vest["conf"]:
+                    best_vest = item
+
+        # Gloves association
+        for item in gloves:
+            if point_in_box(get_center(item["box"]), gloves_region):
+                if best_gloves is None or item["conf"] > best_gloves["conf"]:
+                    best_gloves = item
+
+        # Boots association
+        for item in boots:
+            if point_in_box(get_center(item["box"]), boots_region):
+                if best_boots is None or item["conf"] > best_boots["conf"]:
+                    best_boots = item
+
+        has_helmet = best_helmet is not None
+        has_glasses = best_glasses is not None
+        has_vest = best_vest is not None
+        has_gloves = best_gloves is not None
+        has_boots = best_boots is not None
+
+        missing_items = []
+        if not has_helmet:
+            missing_items.append("helmet")
+        if not has_glasses:
+            missing_items.append("glasses")
+        if not has_vest:
+            missing_items.append("vest")
+
+        is_violation = len(missing_items) > 0
+        if is_violation:
+            total_violations += 1
+
+        # Person box color like image/video
+        person_color = get_color_bgr("person_violation") if is_violation else get_color_bgr("person_safe")
+
+        status_text = (
+            f"ID {person_id}: Missing -> {', '.join(missing_items)}"
+            if is_violation
+            else f"ID {person_id}: SAFE"
+        )
+
+        cv2.rectangle(frame, (px1, py1), (px2, py2), person_color, 2)
+        cv2.putText(
+            frame,
+            status_text,
+            (px1, max(25, py1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            person_color,
+            2
+        )
+
+        detail_text = (
+            f"H:{'Y' if has_helmet else 'N'}  "
+            f"Gl:{'Y' if has_glasses else 'N'}  "
+            f"V:{'Y' if has_vest else 'N'}  "
+            f"Glv:{'Y' if has_gloves else 'N'}  "
+            f"Bts:{'Y' if has_boots else 'N'}"
+        )
+
+        text_y = py2 + 24 if py2 + 24 < frame.shape[0] else py2 - 12
+        cv2.putText(
+            frame,
+            detail_text,
+            (px1, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (255, 255, 0),
+            2
+        )
+
+        # Draw class boxes + labels like image/video
+        if show_ppe_boxes:
+            linked_items = [
+                ("helmet", best_helmet, get_color_bgr("helmet")),
+                ("glasses", best_glasses, get_color_bgr("glasses")),
+                ("vest", best_vest, get_color_bgr("vest")),
+                ("gloves", best_gloves, get_color_bgr("gloves")),
+                ("boots", best_boots, get_color_bgr("boots")),
+            ]
+
+            for item_name, item_det, item_color in linked_items:
+                if item_det is not None:
+                    ix1, iy1, ix2, iy2 = item_det["box"]
+                    cv2.rectangle(frame, (ix1, iy1), (ix2, iy2), item_color, 2)
+                    cv2.putText(
+                        frame,
+                        f"{item_name} {item_det['conf']:.2f}",
+                        (ix1, max(20, iy1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.52,
+                        item_color,
+                        2
+                    )
+
+        perf_rows.append({
+            "person_id": person_id,
+            "helmet": has_helmet,
+            "glasses": has_glasses,
+            "vest": has_vest,
+            "gloves": has_gloves,
+            "boots": has_boots,
+            "missing": ", ".join(missing_items) if missing_items else "None",
+        })
+
+    return frame, total_persons, total_violations, perf_rows
 
 
 def annotate_frame(frame_bgr: np.ndarray, persons: List[dict], boots: List[dict], gloves: List[dict], helmets: List[dict],
@@ -700,8 +813,14 @@ class PPEVideoProcessor(VideoProcessorBase):
             t2 = time.perf_counter()
 
             # Use simple live annotation (no session_state access)
-            annotated, total_persons, total_violations = annotate_frame_live(
-                img, persons, boots, gloves, helmets, vests, glasses,
+            annotated, total_persons, total_violations, perf_rows = annotate_frame_live(
+                img,
+                persons,
+                boots,
+                gloves,
+                helmets,
+                vests,
+                glasses,
                 self.settings["show_ppe_boxes"],
             )
             t3 = time.perf_counter()
@@ -729,7 +848,7 @@ class PPEVideoProcessor(VideoProcessorBase):
                 self.frames_buffer.pop(0)
                 self.frames_buffer.append(annotated.copy())
             
-            self._update_shared_state(perf=perf, rows=[], error="")
+            self._update_shared_state(perf=perf, rows=perf_rows, error="")
             return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
         except Exception as e:
