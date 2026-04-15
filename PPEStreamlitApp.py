@@ -8,12 +8,51 @@ try:
     
     # Create a wrapper that provides all needed methods
     class CV2Wrapper:
+        # Copy all attributes from real cv2
+        def __init__(self):
+            for attr in dir(_real_cv2):
+                if not attr.startswith('_'):
+                    try:
+                        setattr(self, attr, getattr(_real_cv2, attr))
+                    except:
+                        pass
+        
+        # Explicitly define critical methods that must not fail
+        def setNumThreads(self, num):
+            """No-op - ultralytics calls this but we don't need it"""
+            try:
+                if hasattr(_real_cv2, 'setNumThreads'):
+                    return _real_cv2.setNumThreads(num)
+            except:
+                pass
+            return None
+        
+        def getTickCount(self):
+            """Timing method for real or mock"""
+            try:
+                if hasattr(_real_cv2, 'getTickCount'):
+                    return _real_cv2.getTickCount()
+            except:
+                pass
+            import time
+            return int(time.time() * 1000)
+        
+        def getTickFrequency(self):
+            """Timing method for real or mock"""
+            try:
+                if hasattr(_real_cv2, 'getTickFrequency'):
+                    return _real_cv2.getTickFrequency()
+            except:
+                pass
+            return 1000.0
+        
         def __getattr__(self, name):
-            # First try to get from real cv2
-            if hasattr(_real_cv2, name):
+            """Fallback for any missing attributes"""
+            try:
                 return getattr(_real_cv2, name)
-            # Otherwise return a no-op function for missing methods
-            return lambda *args, **kwargs: None
+            except:
+                # Return no-op lambda for any missing method
+                return lambda *args, **kwargs: None
     
     cv2 = CV2Wrapper()
 except ImportError:
