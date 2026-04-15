@@ -393,8 +393,13 @@ def remove_duplicate_persons(persons: List[dict], iou_threshold: float = 0.55) -
 
 def detect_main(frame_bgr: np.ndarray, ppe_model: YOLO, conf_threshold: float, iou_threshold: float, infer_size: int,
                 min_person_conf: float, min_person_area: int, min_person_height: int):
+    # Convert numpy array (BGR) to PIL Image (RGB) - ultralytics handles PIL better than raw arrays
+    from PIL import Image
+    frame_rgb = frame_bgr[..., ::-1]  # Convert BGR to RGB
+    pil_image = Image.fromarray(frame_rgb.astype('uint8'))
+    
     results = ppe_model.predict(
-        source=frame_bgr,
+        source=pil_image,
         conf=conf_threshold,
         iou=iou_threshold,
         imgsz=infer_size,
@@ -465,8 +470,13 @@ def detect_glasses(frame_bgr: np.ndarray, glasses_model: YOLO, infer_size: int, 
     if glasses_class_id is None:
         return []
 
+    # Convert numpy array (BGR) to PIL Image (RGB) - ultralytics handles PIL better than raw arrays
+    from PIL import Image
+    frame_rgb = frame_bgr[..., ::-1]  # Convert BGR to RGB
+    pil_image = Image.fromarray(frame_rgb.astype('uint8'))
+
     results = glasses_model.predict(
-        source=frame_bgr,
+        source=pil_image,
         conf=0.12,
         iou=0.40,
         imgsz=infer_size,
