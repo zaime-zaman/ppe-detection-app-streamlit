@@ -10,12 +10,35 @@ try:
     class CV2Wrapper:
         # Copy all attributes from real cv2
         def __init__(self):
+            # Add constants that might be missing
+            self.IMREAD_COLOR = 1
+            self.IMREAD_GRAYSCALE = 0
+            self.COLOR_BGR2RGB = 4
+            self.COLOR_RGB2BGR = 5
+            
             for attr in dir(_real_cv2):
                 if not attr.startswith('_'):
                     try:
                         setattr(self, attr, getattr(_real_cv2, attr))
                     except:
                         pass
+        
+        def imdecode(self, buf, flags):
+            """Decode image from bytes - try real cv2 first, fallback to PIL"""
+            try:
+                if hasattr(_real_cv2, 'imdecode'):
+                    return _real_cv2.imdecode(buf, flags)
+            except:
+                pass
+            # Fallback: use PIL
+            from PIL import Image
+            try:
+                import io
+                pil_img = Image.open(io.BytesIO(buf.tobytes() if hasattr(buf, 'tobytes') else bytes(buf)))
+                pil_img = pil_img.convert('RGB')
+                return np.array(pil_img)[..., ::-1]  # Convert RGB to BGR
+            except:
+                return None
         
         # Explicitly define critical methods that must not fail
         def setNumThreads(self, num):
@@ -65,6 +88,20 @@ except ImportError:
         COLOR_BGR2RGB = 4
         COLOR_RGB2BGR = 5
         INTER_AREA = 1
+        IMREAD_COLOR = 1
+        IMREAD_GRAYSCALE = 0
+        
+        @staticmethod
+        def imdecode(buf, flags):
+            """Decode image from bytes using PIL"""
+            try:
+                import io
+                pil_img = Image.open(io.BytesIO(buf.tobytes() if hasattr(buf, 'tobytes') else bytes(buf)))
+                pil_img = pil_img.convert('RGB')
+                return np.array(pil_img)[..., ::-1]  # Convert RGB to BGR
+            except Exception as e:
+                print(f"imdecode error: {e}")
+                return None
         
         @staticmethod
         def cvtColor(img, code):
