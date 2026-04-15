@@ -57,6 +57,22 @@ except ImportError:
                 font = ImageFont.load_default()
             draw.text(org, text, fill=color_rgb, font=font)
             np.copyto(img, np.array(pil_img))
+        
+        @staticmethod
+        def setNumThreads(num):
+            """Mock method - ultralytics calls this to prevent OpenCV threading"""
+            pass
+        
+        @staticmethod
+        def getTickCount():
+            """Mock timing method"""
+            import time
+            return int(time.time() * 1000)
+        
+        @staticmethod
+        def getTickFrequency():
+            """Mock timing method"""
+            return 1000.0
     
     cv2 = CV2Mock()
     sys.modules['cv2'] = cv2
