@@ -7,7 +7,7 @@ from threading import Lock
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-import cv2
+import cv2_compat as cv2  # Use PIL-based compatibility layer for Streamlit Cloud
 import numpy as np
 import pandas as pd
 import streamlit as st
