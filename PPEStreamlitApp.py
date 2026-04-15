@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import tempfile
 import warnings
@@ -7,7 +8,59 @@ from threading import Lock
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-import cv2
+# Mock cv2 before it's imported by ultralytics
+# This allows the app to load even if system cv2 libs are missing
+try:
+    import cv2
+except ImportError:
+    # Create a minimal cv2 mock using PIL
+    from PIL import Image, ImageDraw, ImageFont
+    import numpy as np
+    
+    class CV2Mock:
+        FONT_HERSHEY_SIMPLEX = 0
+        COLOR_BGR2RGB = 4
+        COLOR_RGB2BGR = 5
+        INTER_AREA = 1
+        
+        @staticmethod
+        def cvtColor(img, code):
+            if code == 4:  # BGR2RGB
+                return img[..., ::-1]
+            elif code == 5:  # RGB2BGR
+                return img[..., ::-1]
+            return img
+        
+        @staticmethod
+        def resize(img, size, interpolation=None):
+            pil_img = Image.fromarray(img.astype('uint8'))
+            pil_img = pil_img.resize(size, Image.LANCZOS)
+            return np.array(pil_img)
+        
+        @staticmethod
+        def rectangle(img, pt1, pt2, color, thickness):
+            pil_img = Image.fromarray(img.astype('uint8'))
+            draw = ImageDraw.Draw(pil_img)
+            color_rgb = (color[2], color[1], color[0]) if len(color) == 3 else color
+            draw.rectangle([pt1, pt2], outline=color_rgb, width=thickness)
+            np.copyto(img, np.array(pil_img))
+        
+        @staticmethod
+        def putText(img, text, org, fontFace, fontScale, color, thickness):
+            pil_img = Image.fromarray(img.astype('uint8'))
+            draw = ImageDraw.Draw(pil_img)
+            color_rgb = (color[2], color[1], color[0]) if len(color) == 3 else color
+            font_size = max(8, int(fontScale * 20))
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+            except:
+                font = ImageFont.load_default()
+            draw.text(org, text, fill=color_rgb, font=font)
+            np.copyto(img, np.array(pil_img))
+    
+    cv2 = CV2Mock()
+    sys.modules['cv2'] = cv2
+
 import numpy as np
 import pandas as pd
 import streamlit as st
