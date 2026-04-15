@@ -1,5 +1,5 @@
-libffi7
-libpcre3
+libffi8
+libpcre2-8
 libglib2.0-0
 libgl1
 libsm6
