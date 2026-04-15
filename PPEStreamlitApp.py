@@ -1,19 +1,23 @@
-import os
+# Setup cv2 mock/wrapper FIRST before any other imports
+# This ensures ultralytics gets a complete cv2 interface
 import sys
-import time
-import tempfile
-import warnings
-from collections import deque
-from threading import Lock
-from pathlib import Path
-from typing import List, Tuple, Optional
 
-# Mock cv2 before it's imported by ultralytics
-# This allows the app to load even if system cv2 libs are missing
+# Try to import real cv2, but wrap it with additional methods if needed
 try:
-    import cv2
+    import cv2 as _real_cv2
+    
+    # Create a wrapper that provides all needed methods
+    class CV2Wrapper:
+        def __getattr__(self, name):
+            # First try to get from real cv2
+            if hasattr(_real_cv2, name):
+                return getattr(_real_cv2, name)
+            # Otherwise return a no-op function for missing methods
+            return lambda *args, **kwargs: None
+    
+    cv2 = CV2Wrapper()
 except ImportError:
-    # Create a minimal cv2 mock using PIL
+    # Real cv2 not available - use pure PIL mock
     from PIL import Image, ImageDraw, ImageFont
     import numpy as np
     
@@ -60,22 +64,30 @@ except ImportError:
         
         @staticmethod
         def setNumThreads(num):
-            """Mock method - ultralytics calls this to prevent OpenCV threading"""
             pass
         
         @staticmethod
         def getTickCount():
-            """Mock timing method"""
             import time
             return int(time.time() * 1000)
         
         @staticmethod
         def getTickFrequency():
-            """Mock timing method"""
             return 1000.0
     
     cv2 = CV2Mock()
-    sys.modules['cv2'] = cv2
+
+# Register in sys.modules so ultralytics gets it
+sys.modules['cv2'] = cv2
+
+import os
+import time
+import tempfile
+import warnings
+from collections import deque
+from threading import Lock
+from pathlib import Path
+from typing import List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
